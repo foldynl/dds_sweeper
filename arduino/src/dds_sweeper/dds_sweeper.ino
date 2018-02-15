@@ -1,6 +1,3 @@
-#include <EEPROM.h>
-#include "cw.h"
-
 /***
  * update 12 02 2016 Version "dds_sweeper2_2"
  * - Korrektur Tunefunktion 't' und Funktion 'c' ( On/off DDS)
@@ -54,7 +51,6 @@ s_eeprom eeprom;
 
 const char  SoftwareVersion[] = "Software Version: " __FILE__; //"Vers.:dds_sweeper1_13dez2014.ino";
 const char     SoftwareDate[] = "Build Date      : " __DATE__; //"Vers.:dds_sweeper1_13dez2014.ino";
-Cw bake(12);  // 2_1 speed von 18 auf 12 erniedrigt
 
 // the setup routine runs once when you press reset:
 void setup() {
@@ -84,7 +80,6 @@ void setup() {
   //Initialise the incoming serial number to zero
   serial_input_number = 0;
 
-  EEPROM.get(0, eeprom);
   calc_offset();
   version();
   Serial.flush();
@@ -137,12 +132,6 @@ void interpreter(char rxd)
     case 'S':
     case 's':
       Perform_sweep();
-      break;
-    case '!':
-      inputText();
-      break;
-    case '#':
-      runBake();
       break;
     case 't':
       if ( tune_aktiv)
@@ -199,13 +188,6 @@ void help()
   Serial.println("---- commands may be lower or upper case ----");
   Serial.println("Gimmick:");
   Serial.println("'t'\t\"tune\" on/off ; send carrier with start frequency ( command 'a' or 'c' )");
-  Serial.println("'!'\tstore following text in EEPROM for beacon tx, end with <enter>");
-  Serial.println("'#'\tsend beacon tx text again and again ( break with '#' )");
-  Serial.println(" \tBeacon frequency is start frequency ( command 'a' or 'c' )");
-  Serial.print("actual beacon text: \"");
-  EEPROM.get(0, eeprom);
-  Serial.print(eeprom.text);
-  Serial.println("\"");
   Serial.print("Info offset forward: ");
   Serial.print(offset_forward, 0);
   Serial.print("; reverse: ");
@@ -311,53 +293,6 @@ void send_byte(byte data_to_send) {
   }
 }
 
-void inputText()
-{ int i;
-  eeprom.text[0] = ' ';
-  for (i = 1; i < sizeof(eeprom.text); i++)
-  { do
-    {} while (Serial.available() == 0);
-    char c = Serial.read();
-    if ( (c == 0x0d ) || (c == 0x0a))
-    { break;
-    }
-    else
-    { eeprom.text[i] = c;
-    }
-  }
-  eeprom.text[i] = 0;
-  EEPROM.put(0, eeprom);
-}
-
-void runBake() {
-  bool ende = false;
-  Serial.print("bake laeuft! stop '#' ");
-  EEPROM.get(0, eeprom);
-  bake.setText(eeprom.text);
-  do
-  { bake.start();
-    while ( bake.busy() )
-    { if (Serial.available() > 0)
-      { char c;
-        c = Serial.read();
-        if (c == '#')
-        { bake.stop();
-          ende = true;
-          break;
-        }
-      }
-      bake.run();
-      if (bake.key)
-      { SetDDSFreq(Fstart_MHz * 1000000);
-      }
-      else
-      { SetDDSFreq(0.0);
-      }
-    }
-  } while ( !ende);
-  dds_off();
-  Serial.println(".. ende");
-}
 
 void tune()
 { SetDDSFreq(Fstart_MHz * 1000000);
