@@ -1,60 +1,124 @@
-/***
- * update 12 02 2016 Version "dds_sweeper2_2"
- * - Korrektur Tunefunktion 't' und Funktion 'c' ( On/off DDS)
- * 
-   update 16 01 2016 Version "dds_sweeper2_1"
-   - bakengeschwindigkeit von 18 auf 12 wpm erniedrigt.
-   - dds_off() bei ende des sweep
-   - dds_off() bei beliebiger taste
-   - befehl 't' = "tune": sendet traeger mit der startfrequenz ( 'a' oder 'c' )
-*/
 /***************************************************************************\
-    Name    : DDS_Sweeper2
+    Name    : DDS_Sweeper
     Author  : Beric Dunn (K6BEZ)
     Notice  : Copyright (c) 2013  CC-BY-SA
             : Creative Commons Attribution-ShareAlike 3.0 Unported License
-    Date    : 9/26/2013  10/2015 (hs)
-    Version : n
-    Notes   : Written using for the Arduino
-            :   Pins:
+
+    Notes   : Antenna analyzer - DDS and Arduino
+            : Arduino Pins mapping
             :    A0 - Reverse Detector Analog in
             :    A1 - Forward Detector Analog in
+
+
             : Modified by Norbert Redeker (DG7EAO) 07/2014
             : Modified by Heribert Schulte dk2jk 09/2014 //(hs)
-            : mit verstaerker hinter dds, (Hardware m4) okt 2015
-            : 17.10.15 bake
+            : Modified by Ladislav Foldyna OK1MLG 2018
+
+            : OK1MLG Versions Changelog:
+               3.1lf - added calibration support,
+                       variable type optimalizations
+                       't' option was removed
+                       'c' option was changed - new meaning
+                       'f' new option - for SWR calibration
+               3.0lf - removed morse module,
+                       added median-style calibration of Analog input,
+                       code style modifications,
+                       changed Sweep output format,
+                       added a command confirmation string "#OK#"
   \***************************************************************************/
 
-// Define Pins used to control AD9850 DDS
+const char  SoftwareVersion[] = "Version: 3.1lf";
 
-// board ..
-const int SCLK  = 12;
-const int FQ_UD = 11;
-const int SDAT  = 10;
-const int RESET = 9;
+#define pulseHigh(pin) {digitalWrite(pin, HIGH); digitalWrite(pin, LOW); }
 
-double Fstart_MHz = 1.0;  // Start Frequency for sweep
-double Fstop_MHz = 30.000;  // Stop Frequency for sweep
-double current_freq_MHz; // Temp variable used during sweep
-long serial_input_number; // Used to build number from serial stream
-int num_steps = 100; // Number of steps to use in the sweep
-//char incoming_char; // Character read from serial stream
-double offset_forward;
-double offset_reverse;
-bool interpreter_aktiv = false;
-bool tune_aktiv = false;
+// Struct stores SWR calibration coefficients
+typedef struct
+{
+  byte do_correction;   // Should algorithm fix SWR?
+                        // 1 = Yes; otherwise = No
 
-struct s_eeprom {
-  char text[40]; // das ist der text fuer die bake
+  double coef3;          // coef number 3
+  double coef2;          // coef number 2
+  double coef1;          // coef number 1
+  double con;            // coef number 0
+} PolynomCoefs;
+
+ /*
+  * The array below defines a correction coefficient matrix. Each row means
+  * 1MHz interval like this
+  *    - index 0 means 0 - 1MHz
+  *    - index 1 means 1 - 2MHz ...
+  *
+  * Each row containts 4 correction coefficients where final SWR is computed as a result
+  * of following formula:
+  *
+  *  SWR = coef3 * RAW_SWR^3 + coef2 * RAW_SWR^2 + coef1 * RAW_SWR + con
+  *
+  *  The coefficients below were computed by external utility based on the result of 'f' command.
+  *  For more information about the calibration, refer documentation for calibration utility
+  */
+#define NUM_CALIBRATION_INTERVALS 31
+const PolynomCoefs calib_coefs[NUM_CALIBRATION_INTERVALS] =
+{
+  { .do_correction = 1, .coef3 = -0.000964, .coef2 = 0.015756, .coef1 = 1.194757, .con = -0.005876},
+  { .do_correction = 1, .coef3 = 0.001645, .coef2 = -0.036698, .coef1 = 1.394098, .con = -0.180184},
+  { .do_correction = 1, .coef3 = 0.000899, .coef2 = -0.019816, .coef1 = 1.330523, .con = -0.129311},
+  { .do_correction = 1, .coef3 = 0.001750, .coef2 = -0.031022, .coef1 = 1.372468, .con = -0.164633},
+  { .do_correction = 1, .coef3 = 0.001042, .coef2 = -0.023993, .coef1 = 1.376893, .con = -0.184829},
+  { .do_correction = 1, .coef3 = 0.000177, .coef2 = -0.003708, .coef1 = 1.310016, .con = -0.128301},
+  { .do_correction = 1, .coef3 = 0.001649, .coef2 = -0.023215, .coef1 = 1.400612, .con = -0.218040},
+  { .do_correction = 1, .coef3 = 0.002490, .coef2 = -0.026770, .coef1 = 1.429066, .con = -0.246352},
+  { .do_correction = 1, .coef3 = 0.002922, .coef2 = -0.022296, .coef1 = 1.442948, .con = -0.270416},
+  { .do_correction = 1, .coef3 = 0.003529, .coef2 = -0.017217, .coef1 = 1.453895, .con = -0.286308},
+  { .do_correction = 1, .coef3 = 0.007028, .coef2 = -0.024068, .coef1 = 1.519851, .con = -0.345758},
+  { .do_correction = 1, .coef3 = 0.018508, .coef2 = -0.107140, .coef1 = 1.836953, .con = -0.610146},
+  { .do_correction = 1, .coef3 = 0.029591, .coef2 = -0.131843, .coef1 = 1.944062, .con = -0.705295},
+  { .do_correction = 1, .coef3 = 0.069384, .coef2 = -0.363137, .coef1 = 2.505017, .con = -1.098422},
+  { .do_correction = 1, .coef3 = 0.083189, .coef2 = -0.338165, .coef1 = 2.428765, .con = -1.054471},
+  { .do_correction = 1, .coef3 = 0.136076, .coef2 = -0.604922, .coef1 = 2.953907, .con = -1.389681},
+  { .do_correction = 1, .coef3 = 0.165383, .coef2 = -0.709227, .coef1 = 3.107269, .con = -1.465635},
+  { .do_correction = 1, .coef3 = 0.195781, .coef2 = -0.873948, .coef1 = 3.437081, .con = -1.682495},
+  { .do_correction = 1, .coef3 = 0.232297, .coef2 = -1.086681, .coef1 = 3.820576, .con = -1.895017},
+  { .do_correction = 1, .coef3 = 0.256462, .coef2 = -1.241932, .coef1 = 4.126300, .con = -2.079333},
+  { .do_correction = 1, .coef3 = 0.220646, .coef2 = -0.992293, .coef1 = 3.609014, .con = -1.766855},
+  { .do_correction = 1, .coef3 = 0.253791, .coef2 = -1.217828, .coef1 = 4.051844, .con = -2.029558},
+  { .do_correction = 1, .coef3 = 0.224653, .coef2 = -1.048951, .coef1 = 3.726836, .con = -1.841419},
+  { .do_correction = 1, .coef3 = 0.221744, .coef2 = -1.055240, .coef1 = 3.736445, .con = -1.840192},
+  { .do_correction = 1, .coef3 = 0.186079, .coef2 = -0.823459, .coef1 = 3.232868, .con = -1.516395},
+  { .do_correction = 1, .coef3 = 0.208819, .coef2 = -1.068261, .coef1 = 3.786621, .con = -1.861766},
+  { .do_correction = 1, .coef3 = 0.165686, .coef2 = -0.825676, .coef1 = 3.326519, .con = -1.592003},
+  { .do_correction = 1, .coef3 = 0.122054, .coef2 = -0.536251, .coef1 = 2.690653, .con = -1.177502},
+  { .do_correction = 1, .coef3 = 0.098520, .coef2 = -0.424684, .coef1 = 2.468258, .con = -1.032900},
+  { .do_correction = 1, .coef3 = 0.099823, .coef2 = -0.503191, .coef1 = 2.676104, .con = -1.160921},
+  { .do_correction = 1, .coef3 = 0.099823, .coef2 = -0.503191, .coef1 = 2.676104, .con = -1.160921}
 };
-s_eeprom eeprom;
 
-const char  SoftwareVersion[] = "Software Version: " __FILE__; //"Vers.:dds_sweeper1_13dez2014.ino";
-const char     SoftwareDate[] = "Build Date      : " __DATE__; //"Vers.:dds_sweeper1_13dez2014.ino";
+// Number of samples used by an analog input calibration procedure
+#define CALIBRATION_SAMPLE_SZ 16
 
-// the setup routine runs once when you press reset:
-void setup() {
-  // Configiure DDS control pins for digital output
+/* ================ DO NOT CHANGE THESE CONSTANTS ================*/
+// board mapping
+const uint8_t SCLK  = 12;
+const uint8_t FQ_UD = 11;
+const uint8_t SDAT  = 10;
+const uint8_t RESET = 9;
+
+unsigned long freq_start = 1.0E6;        // Start Frequency for sweep
+unsigned long freq_stop = 30.0E6;        // Stop Frequency for sweep
+unsigned long serial_input_number = 0L;  // Used to build number from serial stream
+unsigned int num_steps = 100;            // Number of steps to use in the sweep
+
+int offset_forward = 0;      // analog input voltage offset - used for voltage correction
+int offset_reverse = 0;      // analog input voltage offset - used for voltage correction
+
+/* ================  END OF "DO NOT CHANGE THESE CONSTANTS ================*/
+
+/***************
+ * Initial Setup
+ ***************/
+void setup()
+{
+  // Configure DDS control pins for digital output
   pinMode(FQ_UD, OUTPUT);
   pinMode(SCLK, OUTPUT);
   pinMode(SDAT, OUTPUT);
@@ -63,32 +127,53 @@ void setup() {
   // Configure LED pin for digital output
   pinMode(13, OUTPUT);
 
-
   // Set up analog inputs on A0 and A1, internal reference voltage
   pinMode(A0, INPUT);
   pinMode(A1, INPUT);
   analogReference(INTERNAL); // ref voltage = 1,1 volt
 
-
   // initialize serial communication at 57600 baud
   Serial.begin(57600);
 
   // Reset the DDS
-  digitalWrite(RESET, HIGH);
-  digitalWrite(RESET, LOW);
+  pulseHigh(RESET);
 
   //Initialise the incoming serial number to zero
   serial_input_number = 0;
 
-  calc_offset();
-  version();
-  Serial.flush();
+  //Calibrate analog input
+  delay(1000); // it seems that arduino needes to relax before an analog input calibration;
+  calc_analog_input_offsets();
+  endOfCommand();
 
+  Serial.flush();
 }
 
+/******************
+ * Main Event Loop
+ ******************/
+void loop()
+{
+  //Check for character
+  if ( Serial.available() > 0 )
+  {
+    interpreter(Serial.read());
+    Serial.flush();
+  }
+}
+
+/***********************************
+ * Easy Command Line Interpreter
+ *
+ * Input: rxd - character from input
+ **********************************/
 void interpreter(char rxd)
 {
-  switch (rxd) {
+  switch (rxd)
+  {
+    /*************************
+     * Frequency Digits Input
+     */
     case '0':
     case '1':
     case '2':
@@ -98,207 +183,542 @@ void interpreter(char rxd)
     case '6':
     case '7':
     case '8':
-    case '9':  // eingabezahl ansammeln
+    case '9':
       serial_input_number = serial_input_number * 10 + (rxd - '0');
       break;
-    case 'A':  // 7000000A
+
+    /*********************
+     * Set Start Frequency
+     *
+     * Example: 7000000A
+     */
+    case 'A':
     case 'a':
-      //Turn frequency into FStart
-      Fstart_MHz = ((double)serial_input_number) / 1000000;
-      serial_input_number = 0;
+      freq_start = validate_input_freq(serial_input_number);
+      serial_input_number = 0L;
+      endOfCommand();
       break;
-    case 'B': // 10000000B
+
+    /*********************
+     * Set Stop Frequency
+     *
+     * Example: 70000000B
+     */
+    case 'B':
     case 'b':
-      //Turn frequency into FStop
-      Fstop_MHz = ((double)serial_input_number) / 1000000;
-      serial_input_number = 0;
+      freq_stop = validate_input_freq(serial_input_number);
+      serial_input_number = 0L;
+      endOfCommand();
       break;
-    case 'C':  // 7032000C
+
+    /********************************
+     * Turn frequency into freq_start
+     * and sweep the freq
+     *
+     * Example: 7032000C
+     */
+    case 'C':
     case 'c':
-      //Turn frequency into FStart and set DDS output to single frequency
-      Fstart_MHz = ((double)serial_input_number) / 1000000;
-      //SetDDSFreq(Fstart_MHz);
-      SetDDSFreq(Fstart_MHz * 1000000);
-      delay(100);
-      SetDDSFreq(Fstart_MHz * 1000000);
-      serial_input_number = 0;
+      freq_start = validate_input_freq(serial_input_number);
+      frequency_sweep(freq_start);
+      serial_input_number = 0L;
+      endOfCommand();
       break;
-    case 'N': // 100N
+
+    /*****************************************
+     * Calibration rutine
+     *
+     * Example: 400F when you are
+     *               using 400 ohm dummy load
+     *****************************************/
+    case 'F':
+    case 'f':
+       full_band_calibration(validate_input_freq(serial_input_number));
+       serial_input_number = 0L;
+       endOfCommand();
+       break;
+
+    /***********************************
+     * Set number of steps in the sweep
+     *
+     * Example: 100N
+     */
+    case 'N':
     case 'n':
-      // Set number of steps in the sweep
-      num_steps = serial_input_number;
-      serial_input_number = 0;
+      num_steps = (int)serial_input_number;
+      serial_input_number = 0L;
+      endOfCommand();
       break;
+
+    /**************
+     * Start Sweep
+     */
     case 'S':
     case 's':
-      Perform_sweep();
+      perform_sweep();
+      endOfCommand();
       break;
-    case 't':
-      if ( tune_aktiv)
-      { dds_off();
-        Serial.println("tune off");
-        tune_aktiv = false;
-      }
-      else
-      { tune();
-        Serial.println("tune on");
-        tune_aktiv = true;
-      }
+
+    case 'R':
+    case 'r':
+      calc_analog_input_offsets();
+      endOfCommand();
       break;
+
+    /*************
+     * Print Info
+     */
     case '?':
       sweep_info();
-      Serial.println();
+      endOfCommand();
       break;
-    case 'h':
+
+    /****************
+     * Print Help
+     */
     case 'H':
+    case 'h':
       help();
+      endOfCommand();
       break;
-    case 'v':
+
+    /***************
+     * Print Version
+     */
     case 'V':
+    case 'v':
       version();
+      endOfCommand();
       break;
   }
 }
-void sweep_info() {
+
+/************************************************
+ * Validates input frequency
+ *
+ * Allowed frequencies are between 1Hz and 30MHz
+ *
+ * Input: input_freq - input frequency
+ *
+ * Return: a frequency from valid interval
+ ************************************************/
+unsigned long validate_input_freq( unsigned long input_freq )
+{
+  if ( input_freq <= 0 )
+  {
+    return 1;
+  }
+
+  if ( input_freq > 30.0E6 )
+  {
+    return 30.0E6;
+  }
+
+  return input_freq;
+}
+
+/***************
+ * Print info
+ ***************/
+void sweep_info( void )
+{
   Serial.println("--- Sweep info ---");
-  Serial.print("Start Freq:\t");
-  Serial.println(Fstart_MHz * 1000000);
-  Serial.print("Stop Freq:\t");
-  Serial.println(Fstop_MHz * 1000000);
-  Serial.print("Num Steps:\t");
+  Serial.print("Start Freq:\t\t");
+  Serial.println(freq_start);
+  Serial.print("Stop Freq:\t\t");
+  Serial.println(freq_stop);
+  Serial.print("Num Steps:\t\t");
   Serial.println(num_steps);
-  Serial.println();
+  Serial.print("Analog Offset FWD:\t");
+  Serial.println(offset_forward);
+  Serial.print("Analog Offset REV:\t");
+  Serial.println(offset_reverse);
 }
-void version()
-{ Serial.println(SoftwareVersion);
-  Serial.println(SoftwareDate);
-  Serial.println();
+
+/***************************
+ * Print current build info
+ ***************************/
+void version( void )
+{
+  Serial.println(SoftwareVersion);
 }
-void help()
-{ Serial.println("---- commands---");
+
+/**************
+ * End Command
+ **************/
+ void endOfCommand( void )
+ {
+  Serial.println("#OK#");
+  Serial.flush();
+ }
+
+/**************
+ * Print Help
+ **************/
+void help( void )
+{
+  Serial.println("---- Commands may be lower or upper case ----");
   Serial.println("letter\tdescription\t\texample\t\tresult");
   Serial.println("'a'\tset start frequency\t6000000a\t6.000 Mhz");
   Serial.println("'b'\tset end frequency\t8000000b\t8.000 Mhz");
-  Serial.println("'c'\tset constant frequency\t7032000c\t7.032 Mhz");
-  Serial.println("'n'\tset numer of steps\t100n\t\t100 steps");
+  Serial.println("'c'\tsweep const. frequency\t7032000c\t7.032 Mhz");
+  Serial.println("'f'\tcalibration \t\t300f\t\tusing 300ohm dummy load");
+  Serial.println("'n'\tset number of steps\t100n\t\t100 steps");
   Serial.println("'s'\tperform sweep from frequency a to b with n steps");
+  Serial.println("'r'\tre-calibration of analog inputs");
   Serial.println("'?'\tsweep info");
   Serial.println("'h'\thelp");
   Serial.println("'v'\tsoftware version");
-  Serial.println("---- commands may be lower or upper case ----");
-  Serial.println("Gimmick:");
-  Serial.println("'t'\t\"tune\" on/off ; send carrier with start frequency ( command 'a' or 'c' )");
-  Serial.print("Info offset forward: ");
-  Serial.print(offset_forward, 0);
-  Serial.print("; reverse: ");
-  Serial.println(offset_reverse, 0);
-  Serial.println();
+
 }
 
+/**************************************************************************
+ * Calibration Rutine
+ *
+ * The function sends output numbers in following format via Serial Port
+ *
+ * <EXPECTED_SWR, FREQUENCY_HZ, RAW_SWR>
+ * <EXPECTED_SWR, FREQUENCY_HZ, RAW_SWR>
+ * <EXPECTED_SWR, FREQUENCY_HZ, RAW_SWR>
+ * .....
+ * <EXPECTED_SWR, FREQUENCY_HZ, RAW_SWR>
+ *
+ * Where EXPECTED_SWR = resistor / 50
+ *
+ * Input: resistor - dummy load in Ohm
+ *
+ * Return: none
+ **************************************************************************/
+void full_band_calibration( unsigned int resistor )
+{
+  unsigned long curr_freq = 0L;
 
-// the loop routine runs over and over again forever:
-void loop() {
-  //Check for character
-  if (Serial.available() > 0)
-  { interpreter( Serial.read() );
-    Serial.flush();
+  /* it will measure SWR for every 1MHz interval.
+   * SWR is measeured in the middle of intervals
+   */
+  for ( curr_freq = 0.5E6; curr_freq <= 30.0E6; curr_freq = curr_freq + 1.0E6 )
+  {
+    Serial.print((float)(resistor)/ 50.0, 2);
+    Serial.print(", ");
+    frequency_sweep(curr_freq);
   }
 }
 
-void calc_offset()
-{ int i;
-  int n = 16;
-  SetDDSFreq(0.0); //frequenz auf null einstellen
+/****************************************************************************
+ * Calculates Analog Input Offset
+ *
+ * New offset are stored in global variable
+ * The function sends output numbers in following format via Serial Port
+ * <FWD, REV>
+ * ....
+ ***************************************************************************/
+void calc_analog_input_offsets( void )
+{
+  int samples_rev[CALIBRATION_SAMPLE_SZ];
+  int samples_for[CALIBRATION_SAMPLE_SZ];
+
+  // Switch off DDS for an analog input calibration
+  dds_off();
   delay(100);
-  SetDDSFreq(0.0); //frequenz auf null einstellen
+  dds_off();  // LF: I don't know why it is called two times - from original code
   delay(100);
+
   offset_reverse = 0;
   offset_forward = 0;
-  for (i = 0; i < n; i++)
-  { offset_reverse += (double)analogRead(A0);
-    offset_forward += (double)analogRead(A1);
+
+  // get samples from Analog Input
+  for( byte i = 0; i < CALIBRATION_SAMPLE_SZ; i++ )
+  {
+    samples_for[i] = analogRead(A1);
+    samples_rev[i] = analogRead(A0);
+    Serial.print(samples_for[i]);
+    Serial.print(", ");
+    Serial.println(samples_rev[i]);
     delay(100);
   }
-  offset_reverse =   offset_reverse / n;
-  offset_forward  =  offset_forward / n;
+
+  // compute Median from the values
+  offset_reverse =  median(CALIBRATION_SAMPLE_SZ, samples_rev);
+  offset_forward =  median(CALIBRATION_SAMPLE_SZ, samples_for);
 }
-void Perform_sweep() {
-  double FWD = 0;
-  double REV = 0;
-  double VSWR;
-  double Fstep_MHz = (Fstop_MHz - Fstart_MHz) / num_steps;
 
-  // Start loop
-  for (int i = 0; i <= num_steps; i++) {
-    // Calculate current frequency
-    current_freq_MHz = Fstart_MHz + i * Fstep_MHz;
-    // Set DDS to current frequency
-    SetDDSFreq(current_freq_MHz * 1000000);
-    // Wait a little for settling
-    delay(100);
-    // Read the forawrd and reverse voltages
-    REV = (double)analogRead(A0) - offset_reverse;
-    FWD = (double)analogRead(A1) - offset_forward;
-    if (REV >= FWD)
-    { REV = FWD - 1;
-    }
-    if (REV < 1)
-    { REV = 1;
-    }
-    VSWR = (FWD + REV) / (FWD - REV);
+/***********************************************************************
+ * it measures and computes SWR
+ *
+ * RAW SWR is computed as
+ *
+ *           (FWD + REV)
+ * RAW_SWR = ------------
+ *           (FWD - REV)
+ *
+ * calibrated SWR = coef3 * RAW_SWR^3 + coef2 * RAW_SWR^2 + coef1 * RAW_SWR + con
+ *
+ * coefs3, coefs2, coefs1, con depend on frequency.
+ *
+ * Input:
+ * freq = input frequency
+ * fwd = output parameter - raw FWD value
+ * rev = output parameter - raw REV value
+ * raw_swr = output parameter - raw SWR value
+ *
+ * Return: calibrated SWR
+ *
+ ***********************************************************************/
+float measure_swr( unsigned long freq, int *fwd, int *rev, float *raw_swr )
+{
+  float swr = 0.0;
+  byte coef_index = 0;
 
-    if (VSWR >= 29.0)
-    { VSWR = 28.999;
-    }
-    //Skalieren fuer Ausgabe
-    VSWR = VSWR * 1000.0;
+  *raw_swr = 0.0;
 
-    // Send current line back to PC over serial bus
-    Serial.print(current_freq_MHz * 1000000);
-    Serial.print(", 0, ");
-    Serial.print(VSWR, 5);
-    Serial.print(", ");
-    Serial.print(FWD, 0);
-    Serial.print(", ");
-    Serial.println(REV, 0);
+  // Read the forawrd and reverse voltages
+  *rev = analogRead(A0) - offset_reverse;
+  *fwd = analogRead(A1) - offset_forward;
+
+  if ( *rev >= *fwd )
+  {
+    *rev = *fwd - 1;
   }
-  // Send "End" to PC to indicate end of sweep
+
+  if ( *rev < 1 )
+  {
+    *rev = 1;
+  }
+
+  //Compute the SWR from input values
+  *raw_swr = (float)(*fwd + *rev) / (float)(*fwd - *rev);
+
+  // If SWR is too high then fix a value
+  if ( *raw_swr >= 29.0 )
+  {
+    *raw_swr = 28.999;
+  }
+
+  // If SWR is negative then assigne value 1
+  if ( *raw_swr < 1 )
+  {
+    *raw_swr = 1;
+  }
+
+  // If it is too low then it means SWR 1:1
+  if ( *raw_swr < 1.01 )
+  {
+    return 1.0;
+  }
+
+  // Compute Frequency interval index
+  coef_index = (byte)(freq / 1.0E6);
+
+  // Should function do a correction for particular freq interval?
+  if ( calib_coefs[coef_index].do_correction == 1 )
+  {
+    swr =   calib_coefs[coef_index].coef3 * pow(*raw_swr, 3)
+          + calib_coefs[coef_index].coef2 * pow(*raw_swr, 2)
+          + calib_coefs[coef_index].coef1 * (*raw_swr)
+          + calib_coefs[coef_index].con;
+  }
+  else
+  {
+    swr = *raw_swr;
+  }
+
+  // If final SWR is too high then fix a value
+  if ( swr >= 29.0 )
+  {
+    swr = 28.999;
+  }
+
+  return swr;
+}
+
+/************************************************************************
+ * Sweeping one frequency.
+ * it takes samples of RAW SWR and computes a final SWR as a median of RAW SWR samples
+ *
+ * The function sends output numbers in following format via Serial Port:
+ *
+ * <FREQ, MEDIA(RAW_SWRs)>
+ *
+ * Input:  freq - frequence
+ ***********************************************************************/
+void frequency_sweep( unsigned long freq )
+{
+  int fwd_analog_value = 0;
+  int rev_analog_value = 0;
+  float swr_samples[CALIBRATION_SAMPLE_SZ];
+  float result_swr = 0.0;
+
+  // Set DDS to current frequency
+  SetDDSFreq(freq);
+
+  for ( byte i = 0 ; i < CALIBRATION_SAMPLE_SZ; i++ )
+  {
+     /* !!!! we uses only a raw value of SWR for calibration !!!!*/
+     measure_swr(freq, &fwd_analog_value, &rev_analog_value, swr_samples + i);
+     delay(100);
+  }
+
   dds_off();
-  Serial.println("End");
+
+  // Determine Media from the values
+  result_swr =  median_float(CALIBRATION_SAMPLE_SZ, swr_samples);
+
+  // Send current line back to PC over serial bus
+  // Format
+  // Frequency, VSWR, FWD, REV
+  Serial.print(freq);
+  Serial.print(", ");
+  Serial.println(result_swr, 5);
   Serial.flush();
 }
 
-void SetDDSFreq(double Freq_Hz)
-{ // Calculate the DDS word - from AD9850 Datasheet
-  int32_t f = Freq_Hz * 4294967295 / 125000000;
+/************************************************************************
+ * Sweeping frequency range
+ *
+ * The function sends output numbers in following format via Serial Port
+ *
+ * <FREQ, SWR, ANALOG_FWD, ANALOG_REV, RAW_SWR>
+ *
+ ************************************************************************/
+void perform_sweep( void )
+{
+  int fwd_analog_value = 0;
+  int rev_analog_value = 0;
+  float raw_swr = 0.0;
+  unsigned long curr_freq = 0L;
+  unsigned long freq_step = (freq_stop - freq_start) / num_steps;
+
+
+  for ( unsigned int i = 0; i <= num_steps; i++ )
+  {
+    // Calculate current frequency
+    curr_freq = freq_start + (i * freq_step);
+
+    // Set DDS to current frequency
+    SetDDSFreq(curr_freq);
+
+    // Send current line back to PC over serial bus
+    // Format
+    // Frequency, VSWR, FWD, REV
+
+    Serial.print(curr_freq);
+    Serial.print(", ");
+    Serial.print(measure_swr(curr_freq, &fwd_analog_value, &rev_analog_value, &raw_swr), 2);
+    Serial.print(", ");
+    Serial.print(fwd_analog_value);
+    Serial.print(", ");
+    Serial.print(rev_analog_value);
+    Serial.print(", ");
+    Serial.println(raw_swr);
+  }
+
+  dds_off();
+
+  Serial.flush();
+}
+
+/*****************************
+ * Set DDS Frequency
+ *
+ * Input: freq  - freq in HZ
+ ****************************/
+void SetDDSFreq( unsigned long freq )
+{
+  // Calculate the DDS word - from AD9850 Datasheet
+  int32_t f = freq * 4294967295 / 125000000;
+
   // Send one byte at a time
-  for (int b = 0; b < 4; b++, f >>= 8)
-  { send_byte(f & 0xFF);
+  for (byte b = 0; b < 4; b++, f >>= 8)
+  {
+    send_byte(f & 0xFF);
   }
-  // 5th byte needs to be zeros
+  // final control byte. 0 for 9850
   send_byte(0);
-  // Strobe the Update pin to tell DDS to use values
-  digitalWrite(FQ_UD, HIGH);
-  digitalWrite(FQ_UD, LOW);
+
+  // Done. Inform DDS
+  pulseHigh(FQ_UD);
+
+  delay(200);
 }
 
-void send_byte(byte data_to_send) {
+/*******************
+ * Send Byte to DDS
+ ******************/
+void send_byte( byte data_to_send )
+{
   // Bit bang the byte over the SPI bus
-  for (int i = 0; i < 8; i++, data_to_send >>= 1)
-  { // Set Data bit on output pin
+  for (byte i = 0; i < 8; i++, data_to_send >>= 1)
+  {
+    // Set Data bit on output pin
     digitalWrite(SDAT, data_to_send & 0x01);
-    // Strobe the clock pin
-    digitalWrite(SCLK, HIGH);
-    digitalWrite(SCLK, LOW);
+
+    // Send clock afte each bit.
+    pulseHigh(SCLK);
   }
 }
 
-
-void tune()
-{ SetDDSFreq(Fstart_MHz * 1000000);
+/*****************
+ * Switch Off DDS
+ *****************/
+void dds_off( void )
+{
+  SetDDSFreq(0L);
 }
 
-void dds_off()
-{ SetDDSFreq(0L); // Null hertz = AUS
+/****************
+ * Compute median
+ ***************/
+int median(int n, int x[])
+{
+  int temp;
+  byte i, j;
+
+  for( i = 0; i < n - 1; i++ )
+  {
+    for( j= i + 1; j < n; j++ )
+    {
+       if( x[j] < x[i] )
+       {
+         temp = x[i];
+         x[i] = x[j];
+         x[j] = temp;
+       }
+     }
+  }
+
+  if( n%2 == 0 )
+  {
+    return((x[n/2] + x[n/2 - 1]) / 2);
+  }
+
+  return x[n/2];
 }
 
+/****************
+ * Compute median
+ ***************/
+float median_float(int n, float x[])
+{
+  float temp;
+  byte i, j;
+
+  for( i = 0; i < n - 1; i++ )
+  {
+    for( j= i + 1; j < n; j++ )
+    {
+       if( x[j] < x[i] )
+       {
+         temp = x[i];
+         x[i] = x[j];
+         x[j] = temp;
+       }
+     }
+  }
+
+  if( n%2 == 0 )
+  {
+    return((x[n/2] + x[n/2 - 1]) / 2.0);
+  }
+
+  return x[n/2];
+}
