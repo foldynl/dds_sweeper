@@ -23,31 +23,26 @@
 
 public class FreqRange {
 	private String band;
-	private int freq_low;  // in kHz
+	private int freq_low; // in kHz
 	private int freq_high; // in kHz
-	
-	public FreqRange(String in_band, int in_low, int in_high)
-	{
+
+	public FreqRange(String in_band, int in_low, int in_high) {
 		band = in_band;
 		freq_low = in_low;
 		freq_high = in_high;
 	}
-	
+
 	@Override
-	public String toString()
-	{
+	public String toString() {
 		return band;
 	}
-	
-	public int getLowFreq()
-	{
+
+	public int getLowFreq() {
 		return freq_low;
 	}
-	
-	public int getHighFreq()
-	{
+
+	public int getHighFreq() {
 		return freq_high;
 	}
-	
 
 }
